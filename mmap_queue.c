@@ -1,11 +1,28 @@
+
+/**
+ * Tencent is pleased to support the open source community by making MSEC available.
+ *
+ * Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
+ *
+ * Licensed under the GNU General Public License, Version 2.0 (the "License"); 
+ * you may not use this file except in compliance with the License. You may 
+ * obtain a copy of the License at
+ *
+ *     https://opensource.org/licenses/GPL-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the 
+ * License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language governing permissions
+ * and limitations under the License.
+ */
+
+
 /*
  * mmap_queue.c
  * Implementation of a mmap queue
  *
- *  Created on: 2014-5-5
- *      Author: Shaneyu <shaneyu@tencent.com>
- *
- *  Based on implementation of transaction queue
+*  Created on: 2014-5-5
+ *      Author: Shaneyu <shaneyu@tencent.com
  *
  */
 #include <stdint.h>
@@ -23,7 +40,7 @@
 #include <signal.h>
 #include <sys/file.h>
 #include "mmap_queue.h"
-#include "time_func.h"
+#include "opt_time.h"
 
 #define TOKEN_NO_DATA    0
 #define TOKEN_SKIPPED    0xdb030000 // token to mark the node is skipped
@@ -71,6 +88,10 @@ const char *mq_errorstr(struct mmap_queue *mq)
 // Estimate how many nodes are needed by this length
 #define SQ_NUM_NEEDED_NODES(queue, datalen) 	((datalen) + sizeof(struct mq_node_head_t) + SQ_NODE_SIZE(queue) -1) / SQ_NODE_SIZE(queue)
 
+
+// optimized gettimeofday
+#include "opt_time.h"
+
 // mmap operation wrapper
 inline off_t file_length(const char* szFile)
 {
@@ -93,11 +114,18 @@ static char *open_mmap(const char* mmap_file, size_t length, int *bCreate)
 		int len = strlen(szFullPath);
 		char c = szFullPath[len - 1];
 		if(c != '/')
-			strcat(szFullPath + len, "/");
-		strcat(szFullPath + len, mmap_file);
+		{
+			snprintf(szFullPath + len, sizeof(szFullPath)-len, "/%s", mmap_file);
+		}
+		else
+		{
+			snprintf(szFullPath + len, sizeof(szFullPath)-len, "%s", mmap_file);
+		}
 	}
 	else
-		strcpy(szFullPath, mmap_file);
+	{		
+		snprintf(szFullPath, sizeof(szFullPath), "%s", mmap_file);
+	}
 
 	size_t fl = file_length(szFullPath);
 	
@@ -106,7 +134,11 @@ static char *open_mmap(const char* mmap_file, size_t length, int *bCreate)
 
 	if(fl == 0)
 	{
+		if(length == 0) //not created, return ERR
+			return NULL;
+		mode_t old_mask = umask( 011 );
 		int fd2 = open(szFullPath, O_RDWR|O_APPEND|O_CREAT, 0666);
+		umask( old_mask );
 		if(fd2 == -1)
 		{
 			return NULL;
@@ -130,16 +162,12 @@ static char *open_mmap(const char* mmap_file, size_t length, int *bCreate)
 			return NULL;
 		}
 	}
-
+	mode_t old_mask = umask( 011 );
 	int fd = open(szFullPath, O_RDWR, 0666);
-	void* v = mmap(0, fl, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (MAP_FAILED == v)
-	{
-		close(fd);
-		return NULL;
-	}
-	buf = (char*)v;
+	buf = mmap(0, fl, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 	close(fd);
+	umask( old_mask );
+	
 	*bCreate = created;
 	*(int*)buf = fl;
 
@@ -207,7 +235,11 @@ static int exc_lock(int iUnlocking, int *fd, const char* mmap_file)
 	snprintf(sLockFile, sizeof(sLockFile), "%s_%s", SQ_LOCK_FILE, mmap_file+idx+1);
 
 	if(*fd <= 0)
+	{
+		mode_t old_mask = umask( 011 );
 		*fd = open(sLockFile, O_CREAT, 666);
+		umask(old_mask);
+	}
 	if(*fd < 0)
 	{
 		printf("open lock file %s failed: %s\n", sLockFile, strerror(errno));
@@ -237,7 +269,7 @@ struct mmap_queue *mq_create(const char* mmap_file, int ele_size, int ele_count)
 
 	exc_lock(0, &fd, mmap_file); // lock, if failed, printf and ignore
 
-	struct mmap_queue *queue = (struct mmap_queue *)calloc(1, sizeof(struct mmap_queue));
+	struct mmap_queue *queue = calloc(1, sizeof(struct mmap_queue));
 	if(queue==NULL)
 	{
 		snprintf(errmsg, sizeof(errmsg), "Out of memory");
@@ -273,7 +305,7 @@ struct mmap_queue *mq_open(const char* mmap_file)
 {
 	signal(SIGPIPE, SIG_IGN);
 
-	struct mmap_queue *queue = (struct mmap_queue *)calloc(1, sizeof(struct mmap_queue));
+	struct mmap_queue *queue = calloc(1, sizeof(struct mmap_queue));
 	if(queue==NULL)
 	{
 		snprintf(errmsg, sizeof(errmsg), "Out of memory");
@@ -371,11 +403,11 @@ int mq_put(struct mmap_queue *mq, void *data, int datalen)
 		node->datalen = datalen;
 #ifdef __x86_64__
 		struct timeval tv;
-		Time::now(&tv);
+		opt_gettimeofday(&tv, NULL);
 		node->enqueue_time.tv_sec = tv.tv_sec;
 		node->enqueue_time.tv_usec = tv.tv_usec;
 #else
-		Time::now(&node->enqueue_time);
+		opt_gettimeofday(&node->enqueue_time, NULL);
 #endif
 		memcpy(node->data, data, datalen);
 		node->start_token = TOKEN_HAS_DATA; // mark data ready for reading
@@ -543,7 +575,7 @@ void test_put(struct mmap_queue *queue, int proc_count, int count, char *msg)
 
 	for(i=0; pid && i<count; i++)
 	{
-		sprintf(m, "[%d:%d] %s", pid, i, msg);
+		snprintf(m, 1024, "[%d:%d] %s", pid, i, msg);
 		if(mq_put(queue, m, strlen(m))<0)
 		{
 			printf("put msg[%d] failed: %s\n", i, mq_errorstr(queue));
