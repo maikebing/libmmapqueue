@@ -48,9 +48,9 @@
 
 #define SQ_MAX_CONFLICT_TRIES	10 // maximum number of reading attempts for read-write conflict detection
 
-#define CAS32(ptr, val_old, val_new)({ char ret; __asm__ __volatile__("lock; cmpxchgl %2,%0; setz %1": "+m"(*ptr), "=q"(ret): "r"(val_new),"a"(val_old): "memory"); ret;})
-#define wmb() __asm__ __volatile__("sfence":::"memory")
-#define rmb() __asm__ __volatile__("lfence":::"memory")
+#define CAS32(ptr, val_old, val_new)  __sync_bool_compare_and_swap(ptr, val_old, val_new) 
+#define wmb() __sync_synchronize()
+#define rmb()__sync_synchronize()
 
 static char errmsg[256];
 
